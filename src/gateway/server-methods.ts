@@ -2,6 +2,7 @@ import type { GatewayRequestHandlers, GatewayRequestOptions } from "./server-met
 import { ErrorCodes, errorShape } from "./protocol/index.js";
 import { agentHandlers } from "./server-methods/agent.js";
 import { agentsHandlers } from "./server-methods/agents.js";
+import { automationHandlers } from "./server-methods/automation.js";
 import { browserHandlers } from "./server-methods/browser.js";
 import { channelsHandlers } from "./server-methods/channels.js";
 import { chatHandlers } from "./server-methods/chat.js";
@@ -9,7 +10,9 @@ import { configHandlers } from "./server-methods/config.js";
 import { connectHandlers } from "./server-methods/connect.js";
 import { cronHandlers } from "./server-methods/cron.js";
 import { deviceHandlers } from "./server-methods/devices.js";
+import { eventsHandlers } from "./server-methods/events.js";
 import { execApprovalsHandlers } from "./server-methods/exec-approvals.js";
+import { goalsHandlers } from "./server-methods/goals.js";
 import { healthHandlers } from "./server-methods/health.js";
 import { logsHandlers } from "./server-methods/logs.js";
 import { modelsHandlers } from "./server-methods/models.js";
@@ -19,6 +22,7 @@ import { sessionsHandlers } from "./server-methods/sessions.js";
 import { skillsHandlers } from "./server-methods/skills.js";
 import { systemHandlers } from "./server-methods/system.js";
 import { talkHandlers } from "./server-methods/talk.js";
+import { tasksHandlers } from "./server-methods/tasks.js";
 import { ttsHandlers } from "./server-methods/tts.js";
 import { updateHandlers } from "./server-methods/update.js";
 import { usageHandlers } from "./server-methods/usage.js";
@@ -72,6 +76,15 @@ const READ_METHODS = new Set([
   "node.list",
   "node.describe",
   "chat.history",
+  "task.list",
+  "task.get",
+  "task.count",
+  "goal.list",
+  "goal.get",
+  "events.recent",
+  "events.agent",
+  "automation.list",
+  "automation.get",
 ]);
 const WRITE_METHODS = new Set([
   "send",
@@ -88,6 +101,22 @@ const WRITE_METHODS = new Set([
   "chat.send",
   "chat.abort",
   "browser.request",
+  "task.create",
+  "task.complete",
+  "task.fail",
+  "task.cancel",
+  "task.update",
+  "goal.create",
+  "goal.update.progress",
+  "goal.complete",
+  "goal.pause",
+  "goal.resume",
+  "goal.abandon",
+  "events.publish",
+  "automation.schedule",
+  "automation.disable",
+  "automation.enable",
+  "automation.remove",
 ]);
 
 function authorizeGatewayMethod(method: string, client: GatewayRequestOptions["client"]) {
@@ -188,6 +217,10 @@ export const coreGatewayHandlers: GatewayRequestHandlers = {
   ...agentHandlers,
   ...agentsHandlers,
   ...browserHandlers,
+  ...tasksHandlers,
+  ...goalsHandlers,
+  ...eventsHandlers,
+  ...automationHandlers,
 };
 
 export async function handleGatewayRequest(
