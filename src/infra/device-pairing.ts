@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { StorageBackend } from "./storage-backend.js";
 import { resolveStateDir } from "../config/paths.js";
 
 export type DevicePairingPendingRequest = {
@@ -115,6 +116,56 @@ function pruneExpiredPending(
   }
 }
 
+// ── Storage-backed helpers ────────────────────────────────────────────────────
+
+async function loadStateFromStorage(storage: StorageBackend): Promise<DevicePairingStateFile> {
+  const [pendingRaw, pairedRaw] = await Promise.all([
+    storage.hgetall("pair:pending"),
+    storage.hgetall("pair:devices"),
+  ]);
+  const pendingById: Record<string, DevicePairingPendingRequest> = {};
+  if (pendingRaw) {
+    for (const [id, json] of Object.entries(pendingRaw)) {
+      pendingById[id] = JSON.parse(json);
+    }
+  }
+  const pairedByDeviceId: Record<string, PairedDevice> = {};
+  if (pairedRaw) {
+    for (const [id, json] of Object.entries(pairedRaw)) {
+      pairedByDeviceId[id] = JSON.parse(json);
+    }
+  }
+  // Defense in depth — TTL should handle expiry but prune anyway
+  pruneExpiredPending(pendingById, Date.now());
+  return { pendingById, pairedByDeviceId };
+}
+
+async function persistStateToStorage(
+  state: DevicePairingStateFile,
+  storage: StorageBackend,
+): Promise<void> {
+  // Pending: clear and re-set hash
+  const pendingData: Record<string, string> = {};
+  for (const [id, req] of Object.entries(state.pendingById)) {
+    pendingData[id] = JSON.stringify(req);
+  }
+  await storage.delete("pair:pending");
+  if (Object.keys(pendingData).length > 0) {
+    await storage.hmset("pair:pending", pendingData);
+  }
+  // Paired: clear and re-set hash
+  const pairedData: Record<string, string> = {};
+  for (const [id, device] of Object.entries(state.pairedByDeviceId)) {
+    pairedData[id] = JSON.stringify(device);
+  }
+  await storage.delete("pair:devices");
+  if (Object.keys(pairedData).length > 0) {
+    await storage.hmset("pair:devices", pairedData);
+  }
+}
+
+// ── Locking ──────────────────────────────────────────────────────────────────
+
 let lock: Promise<void> = Promise.resolve();
 async function withLock<T>(fn: () => Promise<T>): Promise<T> {
   const prev = lock;
@@ -130,7 +181,20 @@ async function withLock<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-async function loadState(baseDir?: string): Promise<DevicePairingStateFile> {
+async function withStorageLock<T>(fn: () => Promise<T>, storage?: StorageBackend): Promise<T> {
+  if (storage) {
+    return storage.withLock("pair:state", fn);
+  }
+  return withLock(fn);
+}
+
+async function loadState(
+  baseDir?: string,
+  storage?: StorageBackend,
+): Promise<DevicePairingStateFile> {
+  if (storage) {
+    return loadStateFromStorage(storage);
+  }
   const { pendingPath, pairedPath } = resolvePaths(baseDir);
   const [pending, paired] = await Promise.all([
     readJSON<Record<string, DevicePairingPendingRequest>>(pendingPath),
@@ -144,7 +208,14 @@ async function loadState(baseDir?: string): Promise<DevicePairingStateFile> {
   return state;
 }
 
-async function persistState(state: DevicePairingStateFile, baseDir?: string) {
+async function persistState(
+  state: DevicePairingStateFile,
+  baseDir?: string,
+  storage?: StorageBackend,
+) {
+  if (storage) {
+    return persistStateToStorage(state, storage);
+  }
   const { pendingPath, pairedPath } = resolvePaths(baseDir);
   await Promise.all([
     writeJSONAtomic(pendingPath, state.pendingById),
@@ -235,8 +306,11 @@ function newToken() {
   return randomUUID().replaceAll("-", "");
 }
 
-export async function listDevicePairing(baseDir?: string): Promise<DevicePairingList> {
-  const state = await loadState(baseDir);
+export async function listDevicePairing(
+  baseDir?: string,
+  storage?: StorageBackend,
+): Promise<DevicePairingList> {
+  const state = await loadState(baseDir, storage);
   const pending = Object.values(state.pendingById).toSorted((a, b) => b.ts - a.ts);
   const paired = Object.values(state.pairedByDeviceId).toSorted(
     (a, b) => b.approvedAtMs - a.approvedAtMs,
@@ -247,21 +321,23 @@ export async function listDevicePairing(baseDir?: string): Promise<DevicePairing
 export async function getPairedDevice(
   deviceId: string,
   baseDir?: string,
+  storage?: StorageBackend,
 ): Promise<PairedDevice | null> {
-  const state = await loadState(baseDir);
+  const state = await loadState(baseDir, storage);
   return state.pairedByDeviceId[normalizeDeviceId(deviceId)] ?? null;
 }
 
 export async function requestDevicePairing(
   req: Omit<DevicePairingPendingRequest, "requestId" | "ts" | "isRepair">,
   baseDir?: string,
+  storage?: StorageBackend,
 ): Promise<{
   status: "pending";
   request: DevicePairingPendingRequest;
   created: boolean;
 }> {
-  return await withLock(async () => {
-    const state = await loadState(baseDir);
+  return await withStorageLock(async () => {
+    const state = await loadState(baseDir, storage);
     const deviceId = normalizeDeviceId(req.deviceId);
     if (!deviceId) {
       throw new Error("deviceId required");
@@ -288,17 +364,18 @@ export async function requestDevicePairing(
       ts: Date.now(),
     };
     state.pendingById[request.requestId] = request;
-    await persistState(state, baseDir);
+    await persistState(state, baseDir, storage);
     return { status: "pending", request, created: true };
-  });
+  }, storage);
 }
 
 export async function approveDevicePairing(
   requestId: string,
   baseDir?: string,
+  storage?: StorageBackend,
 ): Promise<{ requestId: string; device: PairedDevice } | null> {
-  return await withLock(async () => {
-    const state = await loadState(baseDir);
+  return await withStorageLock(async () => {
+    const state = await loadState(baseDir, storage);
     const pending = state.pendingById[requestId];
     if (!pending) {
       return null;
@@ -340,34 +417,36 @@ export async function approveDevicePairing(
     };
     delete state.pendingById[requestId];
     state.pairedByDeviceId[device.deviceId] = device;
-    await persistState(state, baseDir);
+    await persistState(state, baseDir, storage);
     return { requestId, device };
-  });
+  }, storage);
 }
 
 export async function rejectDevicePairing(
   requestId: string,
   baseDir?: string,
+  storage?: StorageBackend,
 ): Promise<{ requestId: string; deviceId: string } | null> {
-  return await withLock(async () => {
-    const state = await loadState(baseDir);
+  return await withStorageLock(async () => {
+    const state = await loadState(baseDir, storage);
     const pending = state.pendingById[requestId];
     if (!pending) {
       return null;
     }
     delete state.pendingById[requestId];
-    await persistState(state, baseDir);
+    await persistState(state, baseDir, storage);
     return { requestId, deviceId: pending.deviceId };
-  });
+  }, storage);
 }
 
 export async function updatePairedDeviceMetadata(
   deviceId: string,
   patch: Partial<Omit<PairedDevice, "deviceId" | "createdAtMs" | "approvedAtMs">>,
   baseDir?: string,
+  storage?: StorageBackend,
 ): Promise<void> {
-  return await withLock(async () => {
-    const state = await loadState(baseDir);
+  return await withStorageLock(async () => {
+    const state = await loadState(baseDir, storage);
     const existing = state.pairedByDeviceId[normalizeDeviceId(deviceId)];
     if (!existing) {
       return;
@@ -384,8 +463,8 @@ export async function updatePairedDeviceMetadata(
       roles,
       scopes,
     };
-    await persistState(state, baseDir);
-  });
+    await persistState(state, baseDir, storage);
+  }, storage);
 }
 
 export function summarizeDeviceTokens(
@@ -413,9 +492,10 @@ export async function verifyDeviceToken(params: {
   role: string;
   scopes: string[];
   baseDir?: string;
+  storage?: StorageBackend;
 }): Promise<{ ok: boolean; reason?: string }> {
-  return await withLock(async () => {
-    const state = await loadState(params.baseDir);
+  return await withStorageLock(async () => {
+    const state = await loadState(params.baseDir, params.storage);
     const device = state.pairedByDeviceId[normalizeDeviceId(params.deviceId)];
     if (!device) {
       return { ok: false, reason: "device-not-paired" };
@@ -442,9 +522,9 @@ export async function verifyDeviceToken(params: {
     device.tokens ??= {};
     device.tokens[role] = entry;
     state.pairedByDeviceId[device.deviceId] = device;
-    await persistState(state, params.baseDir);
+    await persistState(state, params.baseDir, params.storage);
     return { ok: true };
-  });
+  }, params.storage);
 }
 
 export async function ensureDeviceToken(params: {
@@ -452,9 +532,10 @@ export async function ensureDeviceToken(params: {
   role: string;
   scopes: string[];
   baseDir?: string;
+  storage?: StorageBackend;
 }): Promise<DeviceAuthToken | null> {
-  return await withLock(async () => {
-    const state = await loadState(params.baseDir);
+  return await withStorageLock(async () => {
+    const state = await loadState(params.baseDir, params.storage);
     const device = state.pairedByDeviceId[normalizeDeviceId(params.deviceId)];
     if (!device) {
       return null;
@@ -484,9 +565,9 @@ export async function ensureDeviceToken(params: {
     tokens[role] = next;
     device.tokens = tokens;
     state.pairedByDeviceId[device.deviceId] = device;
-    await persistState(state, params.baseDir);
+    await persistState(state, params.baseDir, params.storage);
     return next;
-  });
+  }, params.storage);
 }
 
 export async function rotateDeviceToken(params: {
@@ -494,9 +575,10 @@ export async function rotateDeviceToken(params: {
   role: string;
   scopes?: string[];
   baseDir?: string;
+  storage?: StorageBackend;
 }): Promise<DeviceAuthToken | null> {
-  return await withLock(async () => {
-    const state = await loadState(params.baseDir);
+  return await withStorageLock(async () => {
+    const state = await loadState(params.baseDir, params.storage);
     const device = state.pairedByDeviceId[normalizeDeviceId(params.deviceId)];
     if (!device) {
       return null;
@@ -524,18 +606,19 @@ export async function rotateDeviceToken(params: {
       device.scopes = requestedScopes;
     }
     state.pairedByDeviceId[device.deviceId] = device;
-    await persistState(state, params.baseDir);
+    await persistState(state, params.baseDir, params.storage);
     return next;
-  });
+  }, params.storage);
 }
 
 export async function revokeDeviceToken(params: {
   deviceId: string;
   role: string;
   baseDir?: string;
+  storage?: StorageBackend;
 }): Promise<DeviceAuthToken | null> {
-  return await withLock(async () => {
-    const state = await loadState(params.baseDir);
+  return await withStorageLock(async () => {
+    const state = await loadState(params.baseDir, params.storage);
     const device = state.pairedByDeviceId[normalizeDeviceId(params.deviceId)];
     if (!device) {
       return null;
@@ -552,7 +635,7 @@ export async function revokeDeviceToken(params: {
     tokens[role] = entry;
     device.tokens = tokens;
     state.pairedByDeviceId[device.deviceId] = device;
-    await persistState(state, params.baseDir);
+    await persistState(state, params.baseDir, params.storage);
     return entry;
-  });
+  }, params.storage);
 }

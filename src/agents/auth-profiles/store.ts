@@ -1,14 +1,57 @@
 import type { OAuthCredentials } from "@mariozechner/pi-ai";
 import fs from "node:fs";
 import lockfile from "proper-lockfile";
+import type { StorageBackend } from "../../infra/storage-backend.js";
 import type { AuthProfileCredential, AuthProfileStore, ProfileUsageStats } from "./types.js";
 import { resolveOAuthPath } from "../../config/paths.js";
 import { loadJsonFile, saveJsonFile } from "../../infra/json-file.js";
+import { decrypt, encrypt, isEncrypted } from "../../infra/redis-crypto.js";
 import { AUTH_STORE_LOCK_OPTIONS, AUTH_STORE_VERSION, log } from "./constants.js";
 import { syncExternalCliCredentials } from "./external-cli-sync.js";
 import { ensureAuthStoreFile, resolveAuthStorePath, resolveLegacyAuthStorePath } from "./paths.js";
 
 type LegacyAuthStore = Record<string, AuthProfileCredential>;
+
+// ── Redis / StorageBackend helpers ───────────────────────────────────────────
+
+function redisAuthKey(agentDir?: string): string {
+  const suffix = agentDir ? `:${agentDir.replace(/\//g, ":")}` : ":main";
+  return `auth:profiles${suffix}`;
+}
+
+async function loadStoreFromStorage(
+  storage: StorageBackend,
+  encryptionKey: Buffer | undefined,
+  agentDir?: string,
+): Promise<AuthProfileStore | null> {
+  const raw = await storage.get(redisAuthKey(agentDir));
+  if (!raw) {
+    return null;
+  }
+  const json = encryptionKey && isEncrypted(raw) ? decrypt(raw, encryptionKey) : raw;
+  const parsed = coerceAuthStore(JSON.parse(json));
+  return parsed;
+}
+
+async function saveStoreToStorage(
+  store: AuthProfileStore,
+  storage: StorageBackend,
+  encryptionKey: Buffer | undefined,
+  agentDir?: string,
+): Promise<void> {
+  const payload: AuthProfileStore = {
+    version: AUTH_STORE_VERSION,
+    profiles: store.profiles,
+    order: store.order ?? undefined,
+    lastGood: store.lastGood ?? undefined,
+    usageStats: store.usageStats ?? undefined,
+  };
+  const json = JSON.stringify(payload);
+  const value = encryptionKey ? encrypt(json, encryptionKey) : json;
+  await storage.set(redisAuthKey(agentDir), value);
+}
+
+// ── Sync helper ──────────────────────────────────────────────────────────────
 
 function _syncAuthProfileStore(target: AuthProfileStore, source: AuthProfileStore): void {
   target.version = source.version;
@@ -21,7 +64,29 @@ function _syncAuthProfileStore(target: AuthProfileStore, source: AuthProfileStor
 export async function updateAuthProfileStoreWithLock(params: {
   agentDir?: string;
   updater: (store: AuthProfileStore) => boolean;
+  storage?: StorageBackend;
+  encryptionKey?: Buffer;
 }): Promise<AuthProfileStore | null> {
+  // ── Redis / StorageBackend path ──────────────────────────────────────────
+  if (params.storage) {
+    return params.storage.withLock("auth:profiles", async () => {
+      const store = (await loadStoreFromStorage(
+        params.storage!,
+        params.encryptionKey,
+        params.agentDir,
+      )) ?? {
+        version: AUTH_STORE_VERSION,
+        profiles: {},
+      };
+      const shouldSave = params.updater(store);
+      if (shouldSave) {
+        await saveStoreToStorage(store, params.storage!, params.encryptionKey, params.agentDir);
+      }
+      return store;
+    });
+  }
+
+  // ── Filesystem path (unchanged) ──────────────────────────────────────────
   const authPath = resolveAuthStorePath(params.agentDir);
   ensureAuthStoreFile(authPath);
 
@@ -365,7 +430,19 @@ export function ensureAuthProfileStore(
   return merged;
 }
 
-export function saveAuthProfileStore(store: AuthProfileStore, agentDir?: string): void {
+export function saveAuthProfileStore(
+  store: AuthProfileStore,
+  agentDir?: string,
+  storage?: StorageBackend,
+  encryptionKey?: Buffer,
+): void {
+  // ── Redis / StorageBackend path ──────────────────────────────────────────
+  if (storage) {
+    void saveStoreToStorage(store, storage, encryptionKey, agentDir);
+    return;
+  }
+
+  // ── Filesystem path (unchanged) ──────────────────────────────────────────
   const authPath = resolveAuthStorePath(agentDir);
   const payload = {
     version: AUTH_STORE_VERSION,
