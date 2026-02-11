@@ -1,8 +1,13 @@
 import type { ModelCatalogEntry } from "../../agents/model-catalog.js";
+import type { Scheduler } from "../../automation/redis-scheduler.js";
 import type { createDefaultDeps } from "../../cli/deps.js";
 import type { HealthSummary } from "../../commands/health.js";
 import type { CronService } from "../../cron/service.js";
+import type { EventBus } from "../../events/redis-event-bus.js";
+import type { GoalStore } from "../../goals/redis-goal-store.js";
+import type { StorageBackend } from "../../infra/storage-backend.js";
 import type { createSubsystemLogger } from "../../logging/subsystem.js";
+import type { TaskStore } from "../../tasks/redis-task-store.js";
 import type { WizardSession } from "../../wizard/session.js";
 import type { ChatAbortControllerEntry } from "../chat-abort.js";
 import type { NodeRegistry } from "../node-registry.js";
@@ -26,6 +31,7 @@ export type RespondFn = (
 
 export type GatewayRequestContext = {
   deps: ReturnType<typeof createDefaultDeps>;
+  storage: StorageBackend | null;
   cron: CronService;
   cronStorePath: string;
   loadGatewayModelCatalog: () => Promise<ModelCatalogEntry[]>;
@@ -95,6 +101,10 @@ export type GatewayRequestContext = {
     prompter: import("../../wizard/prompts.js").WizardPrompter,
   ) => Promise<void>;
   broadcastVoiceWakeChanged: (triggers: string[]) => void;
+  taskStore: TaskStore | null;
+  goalStore: GoalStore | null;
+  scheduler: Scheduler | null;
+  eventBus: EventBus | null;
 };
 
 export type GatewayRequestOptions = {

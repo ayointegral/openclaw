@@ -236,7 +236,7 @@ export const nodeHandlers: GatewayRequestHandlers = {
       return;
     }
     await respondUnavailableOnThrow(respond, async () => {
-      const list = await listDevicePairing();
+      const list = await listDevicePairing(undefined, context.storage ?? undefined);
       const pairedById = new Map(
         list.paired
           .filter((entry) => isNodeEntry(entry))
@@ -323,7 +323,7 @@ export const nodeHandlers: GatewayRequestHandlers = {
       return;
     }
     await respondUnavailableOnThrow(respond, async () => {
-      const list = await listDevicePairing();
+      const list = await listDevicePairing(undefined, context.storage ?? undefined);
       const paired = list.paired.find((n) => n.deviceId === id && isNodeEntry(n));
       const connected = context.nodeRegistry.listConnected();
       const live = connected.find((n) => n.nodeId === id);
@@ -509,6 +509,7 @@ export const nodeHandlers: GatewayRequestHandlers = {
       const nodeId = client?.connect?.device?.id ?? client?.connect?.client?.id ?? "node";
       const nodeContext = {
         deps: context.deps,
+        storage: context.storage,
         broadcast: context.broadcast,
         nodeSendToSession: context.nodeSendToSession,
         nodeSubscribe: context.nodeSubscribe,

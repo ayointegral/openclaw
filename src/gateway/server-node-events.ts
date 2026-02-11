@@ -39,20 +39,25 @@ export const handleNodeEvent = async (ctx: NodeEventContext, nodeId: string, evt
       const { storePath, entry, canonicalKey } = loadSessionEntry(sessionKey);
       const now = Date.now();
       const sessionId = entry?.sessionId ?? randomUUID();
+      const nodeStorageOpts = ctx.storage ? { storage: ctx.storage } : undefined;
       if (storePath) {
-        await updateSessionStore(storePath, (store) => {
-          store[canonicalKey] = {
-            sessionId,
-            updatedAt: now,
-            thinkingLevel: entry?.thinkingLevel,
-            verboseLevel: entry?.verboseLevel,
-            reasoningLevel: entry?.reasoningLevel,
-            systemSent: entry?.systemSent,
-            sendPolicy: entry?.sendPolicy,
-            lastChannel: entry?.lastChannel,
-            lastTo: entry?.lastTo,
-          };
-        });
+        await updateSessionStore(
+          storePath,
+          (store) => {
+            store[canonicalKey] = {
+              sessionId,
+              updatedAt: now,
+              thinkingLevel: entry?.thinkingLevel,
+              verboseLevel: entry?.verboseLevel,
+              reasoningLevel: entry?.reasoningLevel,
+              systemSent: entry?.systemSent,
+              sendPolicy: entry?.sendPolicy,
+              lastChannel: entry?.lastChannel,
+              lastTo: entry?.lastTo,
+            };
+          },
+          nodeStorageOpts,
+        );
       }
 
       // Ensure chat UI clients refresh when this run completes (even though it wasn't started via chat.send).
@@ -116,20 +121,25 @@ export const handleNodeEvent = async (ctx: NodeEventContext, nodeId: string, evt
       const { storePath, entry, canonicalKey } = loadSessionEntry(sessionKey);
       const now = Date.now();
       const sessionId = entry?.sessionId ?? randomUUID();
+      const agentReqStorageOpts = ctx.storage ? { storage: ctx.storage } : undefined;
       if (storePath) {
-        await updateSessionStore(storePath, (store) => {
-          store[canonicalKey] = {
-            sessionId,
-            updatedAt: now,
-            thinkingLevel: entry?.thinkingLevel,
-            verboseLevel: entry?.verboseLevel,
-            reasoningLevel: entry?.reasoningLevel,
-            systemSent: entry?.systemSent,
-            sendPolicy: entry?.sendPolicy,
-            lastChannel: entry?.lastChannel,
-            lastTo: entry?.lastTo,
-          };
-        });
+        await updateSessionStore(
+          storePath,
+          (store) => {
+            store[canonicalKey] = {
+              sessionId,
+              updatedAt: now,
+              thinkingLevel: entry?.thinkingLevel,
+              verboseLevel: entry?.verboseLevel,
+              reasoningLevel: entry?.reasoningLevel,
+              systemSent: entry?.systemSent,
+              sendPolicy: entry?.sendPolicy,
+              lastChannel: entry?.lastChannel,
+              lastTo: entry?.lastTo,
+            };
+          },
+          agentReqStorageOpts,
+        );
       }
 
       void agentCommand(

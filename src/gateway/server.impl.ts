@@ -7,6 +7,7 @@ import type { startBrowserControlServerIfEnabled } from "./server-browser.js";
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { registerSkillsChangeListener } from "../agents/skills/refresh.js";
 import { initSubagentRegistry } from "../agents/subagent-registry.js";
+import { Scheduler } from "../automation/redis-scheduler.js";
 import { type ChannelId, listChannelPlugins } from "../channels/plugins/index.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import { createDefaultDeps } from "../cli/deps.js";
@@ -19,6 +20,8 @@ import {
   writeConfigFile,
 } from "../config/config.js";
 import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
+import { EventBus } from "../events/redis-event-bus.js";
+import { GoalStore } from "../goals/redis-goal-store.js";
 import { clearAgentRunContext, onAgentEvent } from "../infra/agent-events.js";
 import {
   ensureControlUiAssetsBuilt,
@@ -32,15 +35,18 @@ import { onHeartbeatEvent } from "../infra/heartbeat-events.js";
 import { startHeartbeatRunner } from "../infra/heartbeat-runner.js";
 import { getMachineDisplayName } from "../infra/machine-name.js";
 import { ensureOpenClawCliOnPath } from "../infra/path-env.js";
+import { getRedisClient, resolveRedisOptions, shutdownRedis } from "../infra/redis-client.js";
 import { setGatewaySigusr1RestartPolicy } from "../infra/restart.js";
 import {
   primeRemoteSkillsCache,
   refreshRemoteBinsForConnectedNodes,
   setSkillsRemoteRegistry,
 } from "../infra/skills-remote.js";
+import { createStorageBackend, type StorageBackend } from "../infra/storage-backend.js";
 import { scheduleGatewayUpdateCheck } from "../infra/update-startup.js";
 import { startDiagnosticHeartbeat, stopDiagnosticHeartbeat } from "../logging/diagnostic.js";
 import { createSubsystemLogger, runtimeForLogger } from "../logging/subsystem.js";
+import { TaskStore } from "../tasks/redis-task-store.js";
 import { runOnboardingWizard } from "../wizard/onboarding.js";
 import { startGatewayConfigReloader } from "./config-reload.js";
 import { ExecApprovalManager } from "./exec-approval-manager.js";
@@ -51,6 +57,7 @@ import { createGatewayCloseHandler } from "./server-close.js";
 import { buildGatewayCronService } from "./server-cron.js";
 import { startGatewayDiscovery } from "./server-discovery-runtime.js";
 import { applyGatewayLaneConcurrency } from "./server-lanes.js";
+import { startRedisMaintenanceTimer } from "./server-maintenance-redis.js";
 import { startGatewayMaintenanceTimers } from "./server-maintenance.js";
 import { GATEWAY_EVENTS, listGatewayMethods } from "./server-methods-list.js";
 import { coreGatewayHandlers } from "./server-methods.js";
@@ -305,6 +312,26 @@ export async function startGatewayServer(
   const { wizardSessions, findRunningWizard, purgeWizardSession } = createWizardSessionTracker();
 
   const deps = createDefaultDeps();
+
+  let gatewayStorage: StorageBackend | null = null;
+  const redisOpts = resolveRedisOptions();
+  if (redisOpts) {
+    const redisClient = getRedisClient(redisOpts);
+    if (redisClient) {
+      await redisClient.connect();
+      gatewayStorage = createStorageBackend({ backend: "redis", redisClient });
+      log.info("storage: Redis backend active");
+    }
+  }
+  if (!gatewayStorage) {
+    log.info("storage: filesystem backend (Redis not configured)");
+  }
+
+  const taskStore = gatewayStorage ? new TaskStore(gatewayStorage) : null;
+  const goalStore = gatewayStorage ? new GoalStore(gatewayStorage) : null;
+  const scheduler = gatewayStorage ? new Scheduler(gatewayStorage) : null;
+  const eventBus = gatewayStorage ? new EventBus(gatewayStorage) : null;
+
   let canvasHostServer: CanvasHostServer | null = null;
   const gatewayTls = await loadGatewayTlsRuntime(cfgAtStart.gateway?.tls, log.child("tls"));
   if (cfgAtStart.gateway?.tls?.enabled && !gatewayTls.enabled) {
@@ -440,6 +467,15 @@ export async function startGatewayServer(
     nodeSendToSession,
   });
 
+  const stopRedisMaintenance = startRedisMaintenanceTimer({
+    taskStore,
+    eventBus,
+    log: {
+      info: (msg) => log.info(msg),
+      error: (msg) => log.error(msg),
+    },
+  });
+
   const agentUnsub = onAgentEvent(
     createAgentEventHandler({
       broadcast,
@@ -489,6 +525,7 @@ export async function startGatewayServer(
     broadcast,
     context: {
       deps,
+      storage: gatewayStorage,
       cron,
       cronStorePath,
       loadGatewayModelCatalog,
@@ -525,6 +562,10 @@ export async function startGatewayServer(
       markChannelLoggedOut,
       wizardRunner,
       broadcastVoiceWakeChanged,
+      taskStore,
+      goalStore,
+      scheduler,
+      eventBus,
     },
   });
   logGatewayStartup({
@@ -632,6 +673,8 @@ export async function startGatewayServer(
         skillsRefreshTimer = null;
       }
       skillsChangeUnsub();
+      stopRedisMaintenance?.();
+      await shutdownRedis();
       await close(opts);
     },
   };

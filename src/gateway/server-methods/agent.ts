@@ -282,9 +282,13 @@ export const agentHandlers: GatewayRequestHandlers = {
       const agentId = resolveAgentIdFromSessionKey(canonicalSessionKey);
       const mainSessionKey = resolveAgentMainSessionKey({ cfg, agentId });
       if (storePath) {
-        await updateSessionStore(storePath, (store) => {
-          store[canonicalSessionKey] = nextEntry;
-        });
+        await updateSessionStore(
+          storePath,
+          (store) => {
+            store[canonicalSessionKey] = nextEntry;
+          },
+          context.storage ? { storage: context.storage } : undefined,
+        );
       }
       if (canonicalSessionKey === mainSessionKey || canonicalSessionKey === "global") {
         context.addChatRun(idem, {

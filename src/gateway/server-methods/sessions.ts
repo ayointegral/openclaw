@@ -178,21 +178,26 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     const cfg = loadConfig();
     const target = resolveGatewaySessionStoreTarget({ cfg, key });
     const storePath = target.storePath;
-    const applied = await updateSessionStore(storePath, async (store) => {
-      const primaryKey = target.storeKeys[0] ?? key;
-      const existingKey = target.storeKeys.find((candidate) => store[candidate]);
-      if (existingKey && existingKey !== primaryKey && !store[primaryKey]) {
-        store[primaryKey] = store[existingKey];
-        delete store[existingKey];
-      }
-      return await applySessionsPatchToStore({
-        cfg,
-        store,
-        storeKey: primaryKey,
-        patch: p,
-        loadGatewayModelCatalog: context.loadGatewayModelCatalog,
-      });
-    });
+    const patchStorageOpts = context.storage ? { storage: context.storage } : undefined;
+    const applied = await updateSessionStore(
+      storePath,
+      async (store) => {
+        const primaryKey = target.storeKeys[0] ?? key;
+        const existingKey = target.storeKeys.find((candidate) => store[candidate]);
+        if (existingKey && existingKey !== primaryKey && !store[primaryKey]) {
+          store[primaryKey] = store[existingKey];
+          delete store[existingKey];
+        }
+        return await applySessionsPatchToStore({
+          cfg,
+          store,
+          storeKey: primaryKey,
+          patch: p,
+          loadGatewayModelCatalog: context.loadGatewayModelCatalog,
+        });
+      },
+      patchStorageOpts,
+    );
     if (!applied.ok) {
       respond(false, undefined, applied.error);
       return;
@@ -212,7 +217,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     };
     respond(true, result, undefined);
   },
-  "sessions.reset": async ({ params, respond }) => {
+  "sessions.reset": async ({ params, respond, context }) => {
     if (!validateSessionsResetParams(params)) {
       respond(
         false,
@@ -234,43 +239,48 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     const cfg = loadConfig();
     const target = resolveGatewaySessionStoreTarget({ cfg, key });
     const storePath = target.storePath;
-    const next = await updateSessionStore(storePath, (store) => {
-      const primaryKey = target.storeKeys[0] ?? key;
-      const existingKey = target.storeKeys.find((candidate) => store[candidate]);
-      if (existingKey && existingKey !== primaryKey && !store[primaryKey]) {
-        store[primaryKey] = store[existingKey];
-        delete store[existingKey];
-      }
-      const entry = store[primaryKey];
-      const now = Date.now();
-      const nextEntry: SessionEntry = {
-        sessionId: randomUUID(),
-        updatedAt: now,
-        systemSent: false,
-        abortedLastRun: false,
-        thinkingLevel: entry?.thinkingLevel,
-        verboseLevel: entry?.verboseLevel,
-        reasoningLevel: entry?.reasoningLevel,
-        responseUsage: entry?.responseUsage,
-        model: entry?.model,
-        contextTokens: entry?.contextTokens,
-        sendPolicy: entry?.sendPolicy,
-        label: entry?.label,
-        origin: snapshotSessionOrigin(entry),
-        lastChannel: entry?.lastChannel,
-        lastTo: entry?.lastTo,
-        skillsSnapshot: entry?.skillsSnapshot,
-        // Reset token counts to 0 on session reset (#1523)
-        inputTokens: 0,
-        outputTokens: 0,
-        totalTokens: 0,
-      };
-      store[primaryKey] = nextEntry;
-      return nextEntry;
-    });
+    const storageOpts = context.storage ? { storage: context.storage } : undefined;
+    const next = await updateSessionStore(
+      storePath,
+      (store) => {
+        const primaryKey = target.storeKeys[0] ?? key;
+        const existingKey = target.storeKeys.find((candidate) => store[candidate]);
+        if (existingKey && existingKey !== primaryKey && !store[primaryKey]) {
+          store[primaryKey] = store[existingKey];
+          delete store[existingKey];
+        }
+        const entry = store[primaryKey];
+        const now = Date.now();
+        const nextEntry: SessionEntry = {
+          sessionId: randomUUID(),
+          updatedAt: now,
+          systemSent: false,
+          abortedLastRun: false,
+          thinkingLevel: entry?.thinkingLevel,
+          verboseLevel: entry?.verboseLevel,
+          reasoningLevel: entry?.reasoningLevel,
+          responseUsage: entry?.responseUsage,
+          model: entry?.model,
+          contextTokens: entry?.contextTokens,
+          sendPolicy: entry?.sendPolicy,
+          label: entry?.label,
+          origin: snapshotSessionOrigin(entry),
+          lastChannel: entry?.lastChannel,
+          lastTo: entry?.lastTo,
+          skillsSnapshot: entry?.skillsSnapshot,
+          // Reset token counts to 0 on session reset (#1523)
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+        };
+        store[primaryKey] = nextEntry;
+        return nextEntry;
+      },
+      storageOpts,
+    );
     respond(true, { ok: true, key: target.canonicalKey, entry: next }, undefined);
   },
-  "sessions.delete": async ({ params, respond }) => {
+  "sessions.delete": async ({ params, respond, context }) => {
     if (!validateSessionsDeleteParams(params)) {
       respond(
         false,
@@ -329,17 +339,22 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         return;
       }
     }
-    await updateSessionStore(storePath, (store) => {
-      const primaryKey = target.storeKeys[0] ?? key;
-      const existingKey = target.storeKeys.find((candidate) => store[candidate]);
-      if (existingKey && existingKey !== primaryKey && !store[primaryKey]) {
-        store[primaryKey] = store[existingKey];
-        delete store[existingKey];
-      }
-      if (store[primaryKey]) {
-        delete store[primaryKey];
-      }
-    });
+    const deleteStorageOpts = context.storage ? { storage: context.storage } : undefined;
+    await updateSessionStore(
+      storePath,
+      (store) => {
+        const primaryKey = target.storeKeys[0] ?? key;
+        const existingKey = target.storeKeys.find((candidate) => store[candidate]);
+        if (existingKey && existingKey !== primaryKey && !store[primaryKey]) {
+          store[primaryKey] = store[existingKey];
+          delete store[existingKey];
+        }
+        if (store[primaryKey]) {
+          delete store[primaryKey];
+        }
+      },
+      deleteStorageOpts,
+    );
 
     const archived: string[] = [];
     if (deleteTranscript && sessionId) {
@@ -362,7 +377,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
 
     respond(true, { ok: true, key: target.canonicalKey, deleted: existed, archived }, undefined);
   },
-  "sessions.compact": async ({ params, respond }) => {
+  "sessions.compact": async ({ params, respond, context }) => {
     if (!validateSessionsCompactParams(params)) {
       respond(
         false,
@@ -389,16 +404,21 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     const cfg = loadConfig();
     const target = resolveGatewaySessionStoreTarget({ cfg, key });
     const storePath = target.storePath;
+    const compactStorageOpts = context.storage ? { storage: context.storage } : undefined;
     // Lock + read in a short critical section; transcript work happens outside.
-    const compactTarget = await updateSessionStore(storePath, (store) => {
-      const primaryKey = target.storeKeys[0] ?? key;
-      const existingKey = target.storeKeys.find((candidate) => store[candidate]);
-      if (existingKey && existingKey !== primaryKey && !store[primaryKey]) {
-        store[primaryKey] = store[existingKey];
-        delete store[existingKey];
-      }
-      return { entry: store[primaryKey], primaryKey };
-    });
+    const compactTarget = await updateSessionStore(
+      storePath,
+      (store) => {
+        const primaryKey = target.storeKeys[0] ?? key;
+        const existingKey = target.storeKeys.find((candidate) => store[candidate]);
+        if (existingKey && existingKey !== primaryKey && !store[primaryKey]) {
+          store[primaryKey] = store[existingKey];
+          delete store[existingKey];
+        }
+        return { entry: store[primaryKey], primaryKey };
+      },
+      compactStorageOpts,
+    );
     const entry = compactTarget.entry;
     const sessionId = entry?.sessionId;
     if (!sessionId) {
@@ -455,17 +475,21 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     const keptLines = lines.slice(-maxLines);
     fs.writeFileSync(filePath, `${keptLines.join("\n")}\n`, "utf-8");
 
-    await updateSessionStore(storePath, (store) => {
-      const entryKey = compactTarget.primaryKey;
-      const entryToUpdate = store[entryKey];
-      if (!entryToUpdate) {
-        return;
-      }
-      delete entryToUpdate.inputTokens;
-      delete entryToUpdate.outputTokens;
-      delete entryToUpdate.totalTokens;
-      entryToUpdate.updatedAt = Date.now();
-    });
+    await updateSessionStore(
+      storePath,
+      (store) => {
+        const entryKey = compactTarget.primaryKey;
+        const entryToUpdate = store[entryKey];
+        if (!entryToUpdate) {
+          return;
+        }
+        delete entryToUpdate.inputTokens;
+        delete entryToUpdate.outputTokens;
+        delete entryToUpdate.totalTokens;
+        entryToUpdate.updatedAt = Date.now();
+      },
+      compactStorageOpts,
+    );
 
     respond(
       true,

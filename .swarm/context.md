@@ -2,6 +2,13 @@
 
 Swarm: default
 
+## Deployment Notes
+
+- **Terry**: Node 22, x86_64, `/opt/stacks/openclaw/`, build-from-source Docker image
+- **Nolly**: Node 22, ARM64 (Apple Silicon), `~/.staging/nolly-docker-compose.yml`, image `openclaw:redis-prod`
+- **Nolly NPM**: `openclaw.ajayi.dev` → `openclaw-gateway-prod:18789` via `proxy-net`
+- **Nolly gateway token**: `2e17904c8705897f9c61483ffec717b79c597839226f572c`
+
 ## Decisions
 
 - **Redis Stack Server 7.4.0-v1**: Includes RediSearch + RedisJSON, no separate module loading

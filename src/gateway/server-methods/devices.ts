@@ -30,7 +30,7 @@ function redactPairedDevice(
 }
 
 export const deviceHandlers: GatewayRequestHandlers = {
-  "device.pair.list": async ({ params, respond }) => {
+  "device.pair.list": async ({ params, respond, context }) => {
     if (!validateDevicePairListParams(params)) {
       respond(
         false,
@@ -44,7 +44,7 @@ export const deviceHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const list = await listDevicePairing();
+    const list = await listDevicePairing(undefined, context.storage ?? undefined);
     respond(
       true,
       {
@@ -69,7 +69,7 @@ export const deviceHandlers: GatewayRequestHandlers = {
       return;
     }
     const { requestId } = params as { requestId: string };
-    const approved = await approveDevicePairing(requestId);
+    const approved = await approveDevicePairing(requestId, undefined, context.storage ?? undefined);
     if (!approved) {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown requestId"));
       return;
@@ -104,7 +104,7 @@ export const deviceHandlers: GatewayRequestHandlers = {
       return;
     }
     const { requestId } = params as { requestId: string };
-    const rejected = await rejectDevicePairing(requestId);
+    const rejected = await rejectDevicePairing(requestId, undefined, context.storage ?? undefined);
     if (!rejected) {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown requestId"));
       return;
@@ -140,7 +140,12 @@ export const deviceHandlers: GatewayRequestHandlers = {
       role: string;
       scopes?: string[];
     };
-    const entry = await rotateDeviceToken({ deviceId, role, scopes });
+    const entry = await rotateDeviceToken({
+      deviceId,
+      role,
+      scopes,
+      storage: context.storage ?? undefined,
+    });
     if (!entry) {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown deviceId/role"));
       return;
@@ -175,7 +180,11 @@ export const deviceHandlers: GatewayRequestHandlers = {
       return;
     }
     const { deviceId, role } = params as { deviceId: string; role: string };
-    const entry = await revokeDeviceToken({ deviceId, role });
+    const entry = await revokeDeviceToken({
+      deviceId,
+      role,
+      storage: context.storage ?? undefined,
+    });
     if (!entry) {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown deviceId/role"));
       return;
