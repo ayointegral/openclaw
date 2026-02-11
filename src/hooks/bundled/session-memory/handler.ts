@@ -174,6 +174,23 @@ const saveSessionToMemory: HookHandler = async (event) => {
     await fs.writeFile(memoryFilePath, entry, "utf-8");
     log.debug("Memory file written successfully");
 
+    // Mirror to Redis memory if available (non-fatal — md file is the primary store)
+    const redisUrl = process.env.OPENCLAW_REDIS_URL;
+    if (redisUrl && cfg) {
+      try {
+        const { RedisMemoryManager } = await import("../../../memory/redis-memory-manager.js");
+        const mgr = await RedisMemoryManager.create({ cfg, agentId, redisUrl });
+        try {
+          await mgr.sync({ reason: `session-memory:${filename}` });
+        } finally {
+          await mgr.close();
+        }
+        log.debug("Memory mirrored to Redis");
+      } catch (err) {
+        log.warn(`Redis mirror failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     // Log completion (but don't send user-visible confirmation - it's internal housekeeping)
     const relPath = memoryFilePath.replace(os.homedir(), "~");
     log.info(`Session context saved to ${relPath}`);

@@ -162,6 +162,21 @@ export async function runMemoryFlushIfNeeded(params: {
         });
       },
     });
+
+    // Mirror newly-written memory files to Redis (non-fatal, fire-and-forget)
+    if (process.env.OPENCLAW_REDIS_URL) {
+      try {
+        const { mirrorRecentMemoryFilesToRedis } = await import("./memory-redis-mirror.js");
+        await mirrorRecentMemoryFilesToRedis(
+          params.followupRun.run.workspaceDir,
+          params.followupRun.run.agentId ?? "default",
+          params.cfg,
+        );
+      } catch {
+        // Non-fatal — md files are the primary store
+      }
+    }
+
     let memoryFlushCompactionCount =
       activeSessionEntry?.compactionCount ??
       (params.sessionKey ? activeSessionStore?.[params.sessionKey]?.compactionCount : 0) ??

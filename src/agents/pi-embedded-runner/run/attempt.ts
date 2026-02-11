@@ -748,6 +748,27 @@ export async function runEmbeddedAttempt(
           }
         }
 
+        // Inject relevant memories from Redis (additive to plugin hooks above)
+        if (process.env.OPENCLAW_REDIS_URL && params.config) {
+          try {
+            const { injectRedisMemories } =
+              await import("../../../plugins/builtin/memory-inject.js");
+            const memResult = await injectRedisMemories({
+              prompt: params.prompt,
+              agentId: hookAgentId,
+              cfg: params.config,
+            });
+            if (memResult?.prependContext) {
+              effectivePrompt = `${memResult.prependContext}\n\n${effectivePrompt}`;
+              log.debug(
+                `redis-memory: prepended recalled memories (${memResult.prependContext.length} chars)`,
+              );
+            }
+          } catch {
+            // Non-fatal — Redis memory injection is best-effort
+          }
+        }
+
         log.debug(`embedded run prompt start: runId=${params.runId} sessionId=${params.sessionId}`);
         cacheTrace?.recordStage("prompt:before", {
           prompt: effectivePrompt,
