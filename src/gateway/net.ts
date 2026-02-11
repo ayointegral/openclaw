@@ -95,12 +95,79 @@ function parseRealIp(realIp?: string): string | undefined {
   return normalizeIp(stripOptionalPort(raw));
 }
 
+/**
+ * Parse an IPv4 address string into a 32-bit numeric value.
+ * Returns undefined if the string is not a valid IPv4 address.
+ */
+function ipv4ToNumber(ip: string): number | undefined {
+  const parts = ip.split(".");
+  if (parts.length !== 4) {
+    return undefined;
+  }
+  let result = 0;
+  for (const part of parts) {
+    const n = parseInt(part, 10);
+    if (Number.isNaN(n) || n < 0 || n > 255 || part !== String(n)) {
+      return undefined;
+    }
+    result = (result * 256 + n) >>> 0; // unsigned 32-bit
+  }
+  return result;
+}
+
+/**
+ * Check if an IPv4 address falls within a CIDR range.
+ * If `cidr` has no `/` prefix, it is treated as an exact match (/32).
+ * Both addresses are normalized (IPv4-mapped IPv6 stripped) before comparison.
+ */
+export function isIpInCidr(ip: string, cidr: string): boolean {
+  const normalizedIp = normalizeIp(ip);
+  if (!normalizedIp) {
+    return false;
+  }
+
+  let cidrAddr: string;
+  let prefixLen: number;
+
+  const slashIdx = cidr.indexOf("/");
+  if (slashIdx === -1) {
+    cidrAddr = cidr;
+    prefixLen = 32;
+  } else {
+    cidrAddr = cidr.slice(0, slashIdx);
+    prefixLen = parseInt(cidr.slice(slashIdx + 1), 10);
+  }
+
+  const normalizedCidr = normalizeIp(cidrAddr);
+  if (!normalizedCidr) {
+    return false;
+  }
+
+  if (Number.isNaN(prefixLen) || prefixLen < 0 || prefixLen > 32) {
+    return false;
+  }
+
+  const ipNum = ipv4ToNumber(normalizedIp);
+  const cidrNum = ipv4ToNumber(normalizedCidr);
+  if (ipNum === undefined || cidrNum === undefined) {
+    return false;
+  }
+
+  if (prefixLen === 0) {
+    return true; // /0 matches everything
+  }
+
+  // Build a bitmask for the prefix length, e.g. /24 → 0xFFFFFF00
+  const mask = (~0 << (32 - prefixLen)) >>> 0;
+  return (ipNum & mask) >>> 0 === (cidrNum & mask) >>> 0;
+}
+
 export function isTrustedProxyAddress(ip: string | undefined, trustedProxies?: string[]): boolean {
   const normalized = normalizeIp(ip);
   if (!normalized || !trustedProxies || trustedProxies.length === 0) {
     return false;
   }
-  return trustedProxies.some((proxy) => normalizeIp(proxy) === normalized);
+  return trustedProxies.some((proxy) => isIpInCidr(normalized, proxy));
 }
 
 export function resolveGatewayClientIp(params: {
