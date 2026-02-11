@@ -91,6 +91,30 @@ const MemorySchema = z
   .strict()
   .optional();
 
+const StorageSchema = z
+  .object({
+    backend: z.union([z.literal("fs"), z.literal("redis")]).optional(),
+    redis: z
+      .object({
+        url: z.string().optional(),
+        keyPrefix: z.string().optional(),
+        tls: z.boolean().optional(),
+        maxRetries: z.number().int().nonnegative().optional(),
+        connectTimeoutMs: z.number().int().positive().optional(),
+        commandTimeoutMs: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    encryption: z
+      .object({
+        enabled: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .optional();
+
 export const OpenClawSchema = z
   .object({
     meta: z
@@ -513,6 +537,7 @@ export const OpenClawSchema = z
       .strict()
       .optional(),
     memory: MemorySchema,
+    storage: StorageSchema,
     skills: z
       .object({
         allowBundled: z.array(z.string()).optional(),
