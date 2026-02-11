@@ -1,10 +1,15 @@
 import { CURRENT_SESSION_VERSION, SessionManager } from "@mariozechner/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
+import type { StorageBackend } from "../../infra/storage-backend.js";
 import type { SessionEntry } from "./types.js";
 import { emitSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
 import { resolveDefaultSessionStorePath, resolveSessionTranscriptPath } from "./paths.js";
-import { loadSessionStore, updateSessionStore } from "./store.js";
+import { loadSessionStore, loadSessionStoreAsync, updateSessionStore } from "./store.js";
+
+function redisTranscriptKey(sessionId: string): string {
+  return `tx:${sessionId}`;
+}
 
 function stripQuery(value: string): string {
   const noHash = value.split("#")[0] ?? value;
@@ -82,6 +87,8 @@ export async function appendAssistantMessageToSessionTranscript(params: {
   mediaUrls?: string[];
   /** Optional override for store path (mostly for tests). */
   storePath?: string;
+  /** When provided, use Redis Streams instead of filesystem JSONL. */
+  storage?: StorageBackend;
 }): Promise<{ ok: true; sessionFile: string } | { ok: false; reason: string }> {
   const sessionKey = params.sessionKey.trim();
   if (!sessionKey) {
@@ -96,6 +103,35 @@ export async function appendAssistantMessageToSessionTranscript(params: {
     return { ok: false, reason: "empty text" };
   }
 
+  // When storage provided, use Redis Streams
+  if (params.storage) {
+    const storePath = params.storePath ?? resolveDefaultSessionStorePath(params.agentId);
+    const store = await loadSessionStoreAsync(storePath, { storage: params.storage });
+    const entry = store[sessionKey] as SessionEntry | undefined;
+    if (!entry?.sessionId) {
+      return { ok: false, reason: `unknown sessionKey: ${sessionKey}` };
+    }
+
+    const txKey = redisTranscriptKey(entry.sessionId);
+
+    // Append the message to Redis Stream
+    const message = {
+      role: "assistant",
+      content: mirrorText,
+      provider: "openclaw",
+      model: "delivery-mirror",
+      timestamp: Date.now(),
+    };
+    await params.storage.append(txKey, JSON.stringify(message));
+
+    // Trim to prevent unbounded growth
+    await params.storage.trim(txKey, 10_000);
+
+    emitSessionTranscriptUpdate(txKey);
+    return { ok: true, sessionFile: txKey };
+  }
+
+  // Existing filesystem path (unchanged)
   const storePath = params.storePath ?? resolveDefaultSessionStorePath(params.agentId);
   const store = loadSessionStore(storePath, { skipCache: true });
   const entry = store[sessionKey] as SessionEntry | undefined;

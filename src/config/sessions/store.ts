@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { MsgContext } from "../../auto-reply/templating.js";
+import type { StorageBackend } from "../../infra/storage-backend.js";
 import type { SessionMaintenanceConfig, SessionMaintenanceMode } from "../types.base.js";
 import { parseByteSize } from "../../cli/parse-bytes.js";
 import { parseDurationMs } from "../../cli/parse-duration.js";
@@ -118,6 +119,85 @@ export function clearSessionStoreCacheForTest(): void {
   SESSION_STORE_CACHE.clear();
 }
 
+// ============================================================================
+// StorageBackend (Redis) helpers
+// ============================================================================
+
+function redisStoreKey(storePath: string): string {
+  const hash = crypto.createHash("sha256").update(storePath).digest("hex").slice(0, 12);
+  return `sess:store:${hash}`;
+}
+
+async function loadSessionStoreFromStorage(
+  storage: StorageBackend,
+  storePath: string,
+): Promise<Record<string, SessionEntry>> {
+  const raw = await storage.hgetall(redisStoreKey(storePath));
+  if (!raw) {
+    return {};
+  }
+  const store: Record<string, SessionEntry> = {};
+  for (const [key, json] of Object.entries(raw)) {
+    try {
+      store[key] = JSON.parse(json) as SessionEntry;
+    } catch {
+      // skip corrupt entries
+    }
+  }
+  return store;
+}
+
+async function saveSessionStoreToStorage(
+  storage: StorageBackend,
+  storePath: string,
+  store: Record<string, SessionEntry>,
+  opts?: SaveSessionStoreOptions,
+): Promise<void> {
+  normalizeSessionStore(store);
+
+  if (!opts?.skipMaintenance) {
+    const maintenance = resolveMaintenanceConfig();
+    const shouldWarnOnly = maintenance.mode === "warn";
+
+    if (shouldWarnOnly) {
+      const activeSessionKey = opts?.activeSessionKey?.trim();
+      if (activeSessionKey) {
+        const warning = getActiveSessionMaintenanceWarning({
+          store,
+          activeSessionKey,
+          pruneAfterMs: maintenance.pruneAfterMs,
+          maxEntries: maintenance.maxEntries,
+        });
+        if (warning) {
+          log.warn("session maintenance would evict active session; skipping enforcement", {
+            activeSessionKey: warning.activeSessionKey,
+            wouldPrune: warning.wouldPrune,
+            wouldCap: warning.wouldCap,
+            pruneAfterMs: warning.pruneAfterMs,
+            maxEntries: warning.maxEntries,
+          });
+          await opts?.onWarn?.(warning);
+        }
+      }
+    } else {
+      pruneStaleEntries(store, maintenance.pruneAfterMs);
+      capEntryCount(store, maintenance.maxEntries);
+      // No file rotation needed for Redis/storage backend
+    }
+  }
+
+  const key = redisStoreKey(storePath);
+  // Clear existing hash and write all entries
+  await storage.delete(key);
+  const data: Record<string, string> = {};
+  for (const [sessionKey, entry] of Object.entries(store)) {
+    data[sessionKey] = JSON.stringify(entry);
+  }
+  if (Object.keys(data).length > 0) {
+    await storage.hmset(key, data);
+  }
+}
+
 type LoadSessionStoreOptions = {
   skipCache?: boolean;
 };
@@ -188,6 +268,21 @@ export function loadSessionStore(
   }
 
   return structuredClone(store);
+}
+
+/**
+ * Async version of `loadSessionStore` that supports StorageBackend.
+ * When `storage` is provided, loads from the storage backend (e.g. Redis).
+ * Otherwise, delegates to the sync filesystem-based `loadSessionStore`.
+ */
+export async function loadSessionStoreAsync(
+  storePath: string,
+  opts: { storage?: StorageBackend; skipCache?: boolean } = {},
+): Promise<Record<string, SessionEntry>> {
+  if (opts.storage) {
+    return loadSessionStoreFromStorage(opts.storage, storePath);
+  }
+  return loadSessionStore(storePath, { skipCache: opts.skipCache });
 }
 
 export function readSessionUpdatedAt(params: {
@@ -558,8 +653,13 @@ async function saveSessionStoreUnlocked(
 export async function saveSessionStore(
   storePath: string,
   store: Record<string, SessionEntry>,
-  opts?: SaveSessionStoreOptions,
+  opts?: SaveSessionStoreOptions & { storage?: StorageBackend },
 ): Promise<void> {
+  if (opts?.storage) {
+    return opts.storage.withLock(redisStoreKey(storePath), async () => {
+      await saveSessionStoreToStorage(opts.storage!, storePath, store, opts);
+    });
+  }
   await withSessionStoreLock(storePath, async () => {
     await saveSessionStoreUnlocked(storePath, store, opts);
   });
@@ -568,8 +668,16 @@ export async function saveSessionStore(
 export async function updateSessionStore<T>(
   storePath: string,
   mutator: (store: Record<string, SessionEntry>) => Promise<T> | T,
-  opts?: SaveSessionStoreOptions,
+  opts?: SaveSessionStoreOptions & { storage?: StorageBackend },
 ): Promise<T> {
+  if (opts?.storage) {
+    return opts.storage.withLock(redisStoreKey(storePath), async () => {
+      const store = await loadSessionStoreFromStorage(opts.storage!, storePath);
+      const result = await mutator(store);
+      await saveSessionStoreToStorage(opts.storage!, storePath, store, opts);
+      return result;
+    });
+  }
   return await withSessionStoreLock(storePath, async () => {
     // Always re-read inside the lock to avoid clobbering concurrent writers.
     const store = loadSessionStore(storePath, { skipCache: true });
@@ -661,8 +769,28 @@ export async function updateSessionStoreEntry(params: {
   storePath: string;
   sessionKey: string;
   update: (entry: SessionEntry) => Promise<Partial<SessionEntry> | null>;
+  storage?: StorageBackend;
 }): Promise<SessionEntry | null> {
-  const { storePath, sessionKey, update } = params;
+  const { storePath, sessionKey, update, storage } = params;
+  if (storage) {
+    return storage.withLock(redisStoreKey(storePath), async () => {
+      const store = await loadSessionStoreFromStorage(storage, storePath);
+      const existing = store[sessionKey];
+      if (!existing) {
+        return null;
+      }
+      const patch = await update(existing);
+      if (!patch) {
+        return existing;
+      }
+      const next = mergeSessionEntry(existing, patch);
+      store[sessionKey] = next;
+      await saveSessionStoreToStorage(storage, storePath, store, {
+        activeSessionKey: sessionKey,
+      });
+      return next;
+    });
+  }
   return await withSessionStoreLock(storePath, async () => {
     const store = loadSessionStore(storePath);
     const existing = store[sessionKey];
@@ -686,8 +814,9 @@ export async function recordSessionMetaFromInbound(params: {
   ctx: MsgContext;
   groupResolution?: import("./types.js").GroupKeyResolution | null;
   createIfMissing?: boolean;
+  storage?: StorageBackend;
 }): Promise<SessionEntry | null> {
-  const { storePath, sessionKey, ctx } = params;
+  const { storePath, sessionKey, ctx, storage } = params;
   const createIfMissing = params.createIfMissing ?? true;
   return await updateSessionStore(
     storePath,
@@ -709,7 +838,7 @@ export async function recordSessionMetaFromInbound(params: {
       store[sessionKey] = next;
       return next;
     },
-    { activeSessionKey: sessionKey },
+    { activeSessionKey: sessionKey, storage },
   );
 }
 
@@ -723,10 +852,11 @@ export async function updateLastRoute(params: {
   deliveryContext?: DeliveryContext;
   ctx?: MsgContext;
   groupResolution?: import("./types.js").GroupKeyResolution | null;
+  storage?: StorageBackend;
 }) {
-  const { storePath, sessionKey, channel, to, accountId, threadId, ctx } = params;
-  return await withSessionStoreLock(storePath, async () => {
-    const store = loadSessionStore(storePath);
+  const { storePath, sessionKey, channel, to, accountId, threadId, ctx, storage } = params;
+
+  const applyRoute = async (store: Record<string, SessionEntry>): Promise<SessionEntry> => {
     const existing = store[sessionKey];
     const now = Date.now();
     const explicitContext = normalizeDeliveryContext(params.deliveryContext);
@@ -786,6 +916,22 @@ export async function updateLastRoute(params: {
       metaPatch ? { ...basePatch, ...metaPatch } : basePatch,
     );
     store[sessionKey] = next;
+    return next;
+  };
+
+  if (storage) {
+    return storage.withLock(redisStoreKey(storePath), async () => {
+      const store = await loadSessionStoreFromStorage(storage, storePath);
+      const next = await applyRoute(store);
+      await saveSessionStoreToStorage(storage, storePath, store, {
+        activeSessionKey: sessionKey,
+      });
+      return next;
+    });
+  }
+  return await withSessionStoreLock(storePath, async () => {
+    const store = loadSessionStore(storePath);
+    const next = await applyRoute(store);
     await saveSessionStoreUnlocked(storePath, store, { activeSessionKey: sessionKey });
     return next;
   });
