@@ -1,6 +1,6 @@
 import type { SessionSendPolicyConfig } from "./types.base.js";
 
-export type MemoryBackend = "builtin" | "qmd";
+export type MemoryBackend = "builtin" | "qmd" | "redis";
 export type MemoryCitationsMode = "auto" | "on" | "off";
 
 export type MemoryConfig = {

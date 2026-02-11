@@ -21,6 +21,30 @@ export async function getMemorySearchManager(params: {
   agentId: string;
 }): Promise<MemorySearchManagerResult> {
   const resolved = resolveMemoryBackendConfig(params);
+
+  // Redis-backed memory
+  if (resolved.backend === "redis") {
+    const redisUrl = process.env.OPENCLAW_REDIS_URL;
+    if (redisUrl) {
+      try {
+        const { RedisMemoryManager } = await import("./redis-memory-manager.js");
+        const manager = await RedisMemoryManager.create({
+          cfg: params.cfg,
+          agentId: params.agentId,
+          redisUrl,
+        });
+        return { manager };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn(`redis memory unavailable; falling back to builtin: ${message}`);
+      }
+    } else {
+      log.warn(
+        "memory.backend is 'redis' but OPENCLAW_REDIS_URL is not set; falling back to builtin",
+      );
+    }
+  }
+
   if (resolved.backend === "qmd" && resolved.qmd) {
     const cacheKey = buildQmdCacheKey(params.agentId, resolved.qmd);
     const cached = QMD_MANAGER_CACHE.get(cacheKey);
