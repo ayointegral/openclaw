@@ -233,6 +233,18 @@ export const OpenClawSchema = z
         attachOnly: z.boolean().optional(),
         defaultProfile: z.string().optional(),
         snapshotDefaults: BrowserSnapshotDefaultsSchema,
+        pool: z
+          .object({
+            image: z.string().optional(),
+            network: z.string().optional(),
+            maxConcurrent: z.number().int().min(1).optional(),
+            maxQueued: z.number().int().min(0).optional(),
+            memoryLimit: z.string().optional(),
+            shmSize: z.string().optional(),
+            timeoutMs: z.number().int().min(1000).optional(),
+          })
+          .strict()
+          .optional(),
         profiles: z
           .record(
             z
@@ -242,12 +254,14 @@ export const OpenClawSchema = z
               .object({
                 cdpPort: z.number().int().min(1).max(65535).optional(),
                 cdpUrl: z.string().optional(),
-                driver: z.union([z.literal("clawd"), z.literal("extension")]).optional(),
+                driver: z
+                  .union([z.literal("clawd"), z.literal("extension"), z.literal("pool")])
+                  .optional(),
                 color: HexColorSchema,
               })
               .strict()
-              .refine((value) => value.cdpPort || value.cdpUrl, {
-                message: "Profile must set cdpPort or cdpUrl",
+              .refine((value) => value.driver === "pool" || value.cdpPort || value.cdpUrl, {
+                message: "Profile must set cdpPort or cdpUrl (unless driver is pool)",
               }),
           )
           .optional(),
