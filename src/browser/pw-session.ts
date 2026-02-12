@@ -10,6 +10,7 @@ import { chromium } from "playwright-core";
 import { formatErrorMessage } from "../infra/errors.js";
 import { getHeadersWithAuth } from "./cdp.helpers.js";
 import { getChromeWebSocketUrl } from "./chrome.js";
+import { applyStealthToBrowser, applyStealthToContext, STEALTH_USER_AGENT } from "./stealth.js";
 
 export type BrowserConsoleMessage = {
   type: string;
@@ -333,6 +334,7 @@ async function connectBrowser(cdpUrl: string): Promise<ConnectedBrowser> {
         const endpoint = wsUrl ?? normalized;
         const headers = getHeadersWithAuth(endpoint);
         const browser = await chromium.connectOverCDP(endpoint, { timeout, headers });
+        await applyStealthToBrowser(browser);
         const connected: ConnectedBrowser = { browser, cdpUrl: normalized };
         cached = connected;
         observeBrowser(browser);
@@ -556,7 +558,11 @@ export async function createPageViaPlaywright(opts: { cdpUrl: string; url: strin
   type: string;
 }> {
   const { browser } = await connectBrowser(opts.cdpUrl);
-  const context = browser.contexts()[0] ?? (await browser.newContext());
+  let context = browser.contexts()[0];
+  if (!context) {
+    context = await browser.newContext({ userAgent: STEALTH_USER_AGENT });
+    await applyStealthToContext(context);
+  }
   ensureContextState(context);
 
   const page = await context.newPage();

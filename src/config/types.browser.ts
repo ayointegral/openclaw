@@ -55,4 +55,15 @@ export type BrowserConfig = {
     /** Kill container after this many ms. Default: 300000 (5 min) */
     timeoutMs?: number;
   };
+  /** Ephemeral FlareSolverr configuration (Cloudflare bypass). */
+  flaresolverr?: {
+    /** Docker image. Default: "ghcr.io/flaresolverr/flaresolverr:latest" */
+    image?: string;
+    /** Docker network to join. Default: "bridge" */
+    network?: string;
+    /** Container memory limit. Default: "1g" */
+    memoryLimit?: string;
+    /** Idle timeout (ms) — auto-destroy after inactivity. Default: 300000 (5 min) */
+    idleTimeoutMs?: number;
+  };
 };

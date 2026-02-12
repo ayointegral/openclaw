@@ -87,6 +87,14 @@ export async function stopBrowserControlService(): Promise<void> {
     // ignore — pool module may not be loaded
   }
 
+  // Shut down ephemeral FlareSolverr container
+  try {
+    const { shutdownFlaresolverr } = await import("../infra/flaresolverr-pool.js");
+    await shutdownFlaresolverr();
+  } catch {
+    // ignore — flaresolverr module may not be loaded
+  }
+
   // Optional: Playwright is not always available (e.g. embedded gateway builds).
   try {
     const mod = await import("./pw-ai.js");

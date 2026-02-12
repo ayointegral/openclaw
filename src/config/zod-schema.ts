@@ -245,6 +245,15 @@ export const OpenClawSchema = z
           })
           .strict()
           .optional(),
+        flaresolverr: z
+          .object({
+            image: z.string().optional(),
+            network: z.string().optional(),
+            memoryLimit: z.string().optional(),
+            idleTimeoutMs: z.number().int().min(1000).optional(),
+          })
+          .strict()
+          .optional(),
         profiles: z
           .record(
             z
