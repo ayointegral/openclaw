@@ -3,8 +3,8 @@ export type BrowserProfileConfig = {
   cdpPort?: number;
   /** CDP URL for this profile (use for remote Chrome). */
   cdpUrl?: string;
-  /** Profile driver (default: openclaw). */
-  driver?: "openclaw" | "extension";
+  /** Profile driver (default: openclaw). "pool" uses ephemeral Docker containers. */
+  driver?: "openclaw" | "extension" | "pool";
   /** Profile color (hex). Auto-assigned at creation. */
   color: string;
 };
@@ -38,4 +38,21 @@ export type BrowserConfig = {
   profiles?: Record<string, BrowserProfileConfig>;
   /** Default snapshot options (applied by the browser tool/CLI when unset). */
   snapshotDefaults?: BrowserSnapshotDefaults;
+  /** Ephemeral browser pool configuration (used when a profile has driver="pool"). */
+  pool?: {
+    /** Docker image for ephemeral containers. Default: "ghcr.io/browserless/chromium:latest" */
+    image?: string;
+    /** Docker network to join. Default: derived from compose project. */
+    network?: string;
+    /** Max concurrent ephemeral containers. Default: 5 */
+    maxConcurrent?: number;
+    /** Max queued requests. Default: 10 */
+    maxQueued?: number;
+    /** Container memory limit. Default: "1g" */
+    memoryLimit?: string;
+    /** Shared memory size. Default: "256m" */
+    shmSize?: string;
+    /** Kill container after this many ms. Default: 300000 (5 min) */
+    timeoutMs?: number;
+  };
 };

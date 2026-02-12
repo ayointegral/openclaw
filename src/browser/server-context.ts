@@ -9,6 +9,7 @@ import type {
   ProfileRuntimeState,
   ProfileStatus,
 } from "./server-context.types.js";
+import type { PooledBrowser } from "../infra/browser-pool.js";
 import { appendCdpPath, createTargetViaCdp, getHeadersWithAuth, normalizeCdpWsUrl } from "./cdp.js";
 import {
   isChromeCdpReady,
@@ -80,11 +81,18 @@ async function fetchOk(url: string, timeoutMs = 1500, init?: RequestInit): Promi
 
 /**
  * Create a profile-scoped context for browser operations.
+ * For pool profiles, the cdpUrl is dynamic — resolved at acquire time.
  */
 function createProfileContext(
   opts: ContextOptions,
   profile: ResolvedBrowserProfile,
 ): ProfileContext {
+  // For pool profiles, we keep a mutable copy of the profile whose cdpUrl
+  // gets overwritten each time we acquire a fresh ephemeral container.
+  let activePool: PooledBrowser | null = null;
+  const effectiveProfile: ResolvedBrowserProfile =
+    profile.driver === "pool" ? { ...profile } : profile;
+
   const state = () => {
     const current = opts.getState();
     if (!current) {
@@ -97,7 +105,7 @@ function createProfileContext(
     const current = state();
     let profileState = current.profiles.get(profile.name);
     if (!profileState) {
-      profileState = { profile, running: null, lastTargetId: null };
+      profileState = { profile: effectiveProfile, running: null, lastTargetId: null };
       current.profiles.set(profile.name, profileState);
     }
     return profileState;
@@ -110,11 +118,11 @@ function createProfileContext(
 
   const listTabs = async (): Promise<BrowserTab[]> => {
     // For remote profiles, use Playwright's persistent connection to avoid ephemeral sessions
-    if (!profile.cdpIsLoopback) {
+    if (!effectiveProfile.cdpIsLoopback) {
       const mod = await getPwAiModule({ mode: "strict" });
       const listPagesViaPlaywright = (mod as Partial<PwAiModule> | null)?.listPagesViaPlaywright;
       if (typeof listPagesViaPlaywright === "function") {
-        const pages = await listPagesViaPlaywright({ cdpUrl: profile.cdpUrl });
+        const pages = await listPagesViaPlaywright({ cdpUrl: effectiveProfile.cdpUrl });
         return pages.map((p) => ({
           targetId: p.targetId,
           title: p.title,
@@ -132,13 +140,13 @@ function createProfileContext(
         webSocketDebuggerUrl?: string;
         type?: string;
       }>
-    >(appendCdpPath(profile.cdpUrl, "/json/list"));
+    >(appendCdpPath(effectiveProfile.cdpUrl, "/json/list"));
     return raw
       .map((t) => ({
         targetId: t.id ?? "",
         title: t.title ?? "",
         url: t.url ?? "",
-        wsUrl: normalizeWsUrl(t.webSocketDebuggerUrl, profile.cdpUrl),
+        wsUrl: normalizeWsUrl(t.webSocketDebuggerUrl, effectiveProfile.cdpUrl),
         type: t.type,
       }))
       .filter((t) => Boolean(t.targetId));
@@ -147,11 +155,11 @@ function createProfileContext(
   const openTab = async (url: string): Promise<BrowserTab> => {
     // For remote profiles, use Playwright's persistent connection to create tabs
     // This ensures the tab persists beyond a single request
-    if (!profile.cdpIsLoopback) {
+    if (!effectiveProfile.cdpIsLoopback) {
       const mod = await getPwAiModule({ mode: "strict" });
       const createPageViaPlaywright = (mod as Partial<PwAiModule> | null)?.createPageViaPlaywright;
       if (typeof createPageViaPlaywright === "function") {
-        const page = await createPageViaPlaywright({ cdpUrl: profile.cdpUrl, url });
+        const page = await createPageViaPlaywright({ cdpUrl: effectiveProfile.cdpUrl, url });
         const profileState = getProfileState();
         profileState.lastTargetId = page.targetId;
         return {
@@ -164,7 +172,7 @@ function createProfileContext(
     }
 
     const createdViaCdp = await createTargetViaCdp({
-      cdpUrl: profile.cdpUrl,
+      cdpUrl: effectiveProfile.cdpUrl,
       url,
     })
       .then((r) => r.targetId)
@@ -194,7 +202,7 @@ function createProfileContext(
       type?: string;
     };
 
-    const endpointUrl = new URL(appendCdpPath(profile.cdpUrl, "/json/new"));
+    const endpointUrl = new URL(appendCdpPath(effectiveProfile.cdpUrl, "/json/new"));
     const endpoint = endpointUrl.search
       ? (() => {
           endpointUrl.searchParams.set("url", url);
@@ -219,13 +227,13 @@ function createProfileContext(
       targetId: created.id,
       title: created.title ?? "",
       url: created.url ?? url,
-      wsUrl: normalizeWsUrl(created.webSocketDebuggerUrl, profile.cdpUrl),
+      wsUrl: normalizeWsUrl(created.webSocketDebuggerUrl, effectiveProfile.cdpUrl),
       type: created.type,
     };
   };
 
   const resolveRemoteHttpTimeout = (timeoutMs: number | undefined) => {
-    if (profile.cdpIsLoopback) {
+    if (effectiveProfile.cdpIsLoopback) {
       return timeoutMs ?? 300;
     }
     const resolved = state().resolved;
@@ -236,7 +244,7 @@ function createProfileContext(
   };
 
   const resolveRemoteWsTimeout = (timeoutMs: number | undefined) => {
-    if (profile.cdpIsLoopback) {
+    if (effectiveProfile.cdpIsLoopback) {
       const base = timeoutMs ?? 300;
       return Math.max(200, Math.min(2000, base * 2));
     }
@@ -250,12 +258,12 @@ function createProfileContext(
   const isReachable = async (timeoutMs?: number) => {
     const httpTimeout = resolveRemoteHttpTimeout(timeoutMs);
     const wsTimeout = resolveRemoteWsTimeout(timeoutMs);
-    return await isChromeCdpReady(profile.cdpUrl, httpTimeout, wsTimeout);
+    return await isChromeCdpReady(effectiveProfile.cdpUrl, httpTimeout, wsTimeout);
   };
 
   const isHttpReachable = async (timeoutMs?: number) => {
     const httpTimeout = resolveRemoteHttpTimeout(timeoutMs);
-    return await isChromeReachable(profile.cdpUrl, httpTimeout);
+    return await isChromeReachable(effectiveProfile.cdpUrl, httpTimeout);
   };
 
   const attachRunning = (running: NonNullable<ProfileRuntimeState["running"]>) => {
@@ -273,26 +281,62 @@ function createProfileContext(
   };
 
   const ensureBrowserAvailable = async (): Promise<void> => {
+    // Pool mode: acquire an ephemeral container on demand
+    if (effectiveProfile.driver === "pool") {
+      if (activePool) {
+        // Already acquired — check if still healthy
+        try {
+          const mod = await import("../infra/browser-pool.js");
+          const pool = mod.getBrowserPool();
+          const stats = pool.stats();
+          if (stats.active > 0) {
+            return; // container is still alive
+          }
+        } catch {
+          // Fall through to re-acquire
+        }
+        activePool = null;
+      }
+      const mod = await import("../infra/browser-pool.js");
+      const poolCfg = state().resolved;
+      const pool = mod.getBrowserPool({
+        image: poolCfg.pool?.image,
+        network: poolCfg.pool?.network,
+        maxConcurrent: poolCfg.pool?.maxConcurrent,
+        maxQueued: poolCfg.pool?.maxQueued,
+        containerMemoryLimit: poolCfg.pool?.memoryLimit,
+        shmSize: poolCfg.pool?.shmSize,
+        containerTimeoutMs: poolCfg.pool?.timeoutMs,
+      });
+      const browser = await pool.acquire();
+      activePool = browser;
+      // Overwrite the effective profile's CDP URL with the container's URL
+      effectiveProfile.cdpUrl = browser.cdpUrl;
+      effectiveProfile.cdpHost = browser.containerName;
+      effectiveProfile.cdpIsLoopback = false;
+      return;
+    }
+
     const current = state();
-    const remoteCdp = !profile.cdpIsLoopback;
-    const isExtension = profile.driver === "extension";
+    const remoteCdp = !effectiveProfile.cdpIsLoopback;
+    const isExtension = effectiveProfile.driver === "extension";
     const profileState = getProfileState();
     const httpReachable = await isHttpReachable();
 
     if (isExtension && remoteCdp) {
       throw new Error(
-        `Profile "${profile.name}" uses driver=extension but cdpUrl is not loopback (${profile.cdpUrl}).`,
+        `Profile "${profile.name}" uses driver=extension but cdpUrl is not loopback (${effectiveProfile.cdpUrl}).`,
       );
     }
 
     if (isExtension) {
       if (!httpReachable) {
-        await ensureChromeExtensionRelayServer({ cdpUrl: profile.cdpUrl });
+        await ensureChromeExtensionRelayServer({ cdpUrl: effectiveProfile.cdpUrl });
         if (await isHttpReachable(1200)) {
           // continue: we still need the extension to connect for CDP websocket.
         } else {
           throw new Error(
-            `Chrome extension relay for profile "${profile.name}" is not reachable at ${profile.cdpUrl}.`,
+            `Chrome extension relay for profile "${profile.name}" is not reachable at ${effectiveProfile.cdpUrl}.`,
           );
         }
       }
@@ -308,7 +352,7 @@ function createProfileContext(
 
     if (!httpReachable) {
       if ((current.resolved.attachOnly || remoteCdp) && opts.onEnsureAttachTarget) {
-        await opts.onEnsureAttachTarget(profile);
+        await opts.onEnsureAttachTarget(effectiveProfile);
         if (await isHttpReachable(1200)) {
           return;
         }
@@ -316,11 +360,11 @@ function createProfileContext(
       if (current.resolved.attachOnly || remoteCdp) {
         throw new Error(
           remoteCdp
-            ? `Remote CDP for profile "${profile.name}" is not reachable at ${profile.cdpUrl}.`
+            ? `Remote CDP for profile "${profile.name}" is not reachable at ${effectiveProfile.cdpUrl}.`
             : `Browser attachOnly is enabled and profile "${profile.name}" is not running.`,
         );
       }
-      const launched = await launchOpenClawChrome(current.resolved, profile);
+      const launched = await launchOpenClawChrome(current.resolved, effectiveProfile);
       attachRunning(launched);
       return;
     }
@@ -333,7 +377,7 @@ function createProfileContext(
     // HTTP responds but WebSocket fails - port in use by something else
     if (!profileState.running) {
       throw new Error(
-        `Port ${profile.cdpPort} is in use for profile "${profile.name}" but not by openclaw. ` +
+        `Port ${effectiveProfile.cdpPort} is in use for profile "${profile.name}" but not by openclaw. ` +
           `Run action=reset-profile profile=${profile.name} to kill the process.`,
       );
     }
@@ -341,7 +385,7 @@ function createProfileContext(
     // We own it but WebSocket failed - restart
     if (current.resolved.attachOnly || remoteCdp) {
       if (opts.onEnsureAttachTarget) {
-        await opts.onEnsureAttachTarget(profile);
+        await opts.onEnsureAttachTarget(effectiveProfile);
         if (await isReachable(1200)) {
           return;
         }
@@ -356,7 +400,7 @@ function createProfileContext(
     await stopOpenClawChrome(profileState.running);
     setProfileRunning(null);
 
-    const relaunched = await launchOpenClawChrome(current.resolved, profile);
+    const relaunched = await launchOpenClawChrome(current.resolved, effectiveProfile);
     attachRunning(relaunched);
 
     if (!(await isReachable(600))) {
@@ -371,7 +415,7 @@ function createProfileContext(
     const profileState = getProfileState();
     const tabs1 = await listTabs();
     if (tabs1.length === 0) {
-      if (profile.driver === "extension") {
+      if (effectiveProfile.driver === "extension") {
         throw new Error(
           `tab not found (no attached Chrome tabs for profile "${profile.name}"). ` +
             "Click the OpenClaw Browser Relay toolbar icon on the tab you want to control (badge ON).",
@@ -384,7 +428,7 @@ function createProfileContext(
     // For remote profiles using Playwright's persistent connection, we don't need wsUrl
     // because we access pages directly through Playwright, not via individual WebSocket URLs.
     const candidates =
-      profile.driver === "extension" || !profile.cdpIsLoopback
+      effectiveProfile.driver === "extension" || !effectiveProfile.cdpIsLoopback
         ? tabs
         : tabs.filter((t) => Boolean(t.wsUrl));
 
@@ -411,7 +455,7 @@ function createProfileContext(
     };
 
     let chosen = targetId ? resolveById(targetId) : pickDefault();
-    if (!chosen && profile.driver === "extension" && candidates.length === 1) {
+    if (!chosen && effectiveProfile.driver === "extension" && candidates.length === 1) {
       // If an agent passes a stale/foreign targetId but we only have a single attached tab,
       // recover by using that tab instead of failing hard.
       chosen = candidates[0] ?? null;
@@ -437,13 +481,13 @@ function createProfileContext(
       throw new Error("tab not found");
     }
 
-    if (!profile.cdpIsLoopback) {
+    if (!effectiveProfile.cdpIsLoopback) {
       const mod = await getPwAiModule({ mode: "strict" });
       const focusPageByTargetIdViaPlaywright = (mod as Partial<PwAiModule> | null)
         ?.focusPageByTargetIdViaPlaywright;
       if (typeof focusPageByTargetIdViaPlaywright === "function") {
         await focusPageByTargetIdViaPlaywright({
-          cdpUrl: profile.cdpUrl,
+          cdpUrl: effectiveProfile.cdpUrl,
           targetId: resolved.targetId,
         });
         const profileState = getProfileState();
@@ -452,7 +496,7 @@ function createProfileContext(
       }
     }
 
-    await fetchOk(appendCdpPath(profile.cdpUrl, `/json/activate/${resolved.targetId}`));
+    await fetchOk(appendCdpPath(effectiveProfile.cdpUrl, `/json/activate/${resolved.targetId}`));
     const profileState = getProfileState();
     profileState.lastTargetId = resolved.targetId;
   };
@@ -468,26 +512,36 @@ function createProfileContext(
     }
 
     // For remote profiles, use Playwright's persistent connection to close tabs
-    if (!profile.cdpIsLoopback) {
+    if (!effectiveProfile.cdpIsLoopback) {
       const mod = await getPwAiModule({ mode: "strict" });
       const closePageByTargetIdViaPlaywright = (mod as Partial<PwAiModule> | null)
         ?.closePageByTargetIdViaPlaywright;
       if (typeof closePageByTargetIdViaPlaywright === "function") {
         await closePageByTargetIdViaPlaywright({
-          cdpUrl: profile.cdpUrl,
+          cdpUrl: effectiveProfile.cdpUrl,
           targetId: resolved.targetId,
         });
         return;
       }
     }
 
-    await fetchOk(appendCdpPath(profile.cdpUrl, `/json/close/${resolved.targetId}`));
+    await fetchOk(appendCdpPath(effectiveProfile.cdpUrl, `/json/close/${resolved.targetId}`));
   };
 
   const stopRunningBrowser = async (): Promise<{ stopped: boolean }> => {
-    if (profile.driver === "extension") {
+    if (effectiveProfile.driver === "pool") {
+      if (activePool) {
+        await activePool.release();
+        activePool = null;
+        effectiveProfile.cdpUrl = "http://pool-pending:3000";
+        effectiveProfile.cdpHost = "pool-pending";
+        return { stopped: true };
+      }
+      return { stopped: false };
+    }
+    if (effectiveProfile.driver === "extension") {
       const stopped = await stopChromeExtensionRelayServer({
-        cdpUrl: profile.cdpUrl,
+        cdpUrl: effectiveProfile.cdpUrl,
       });
       return { stopped };
     }
@@ -501,11 +555,15 @@ function createProfileContext(
   };
 
   const resetProfile = async () => {
-    if (profile.driver === "extension") {
-      await stopChromeExtensionRelayServer({ cdpUrl: profile.cdpUrl }).catch(() => {});
-      return { moved: false, from: profile.cdpUrl };
+    if (effectiveProfile.driver === "pool") {
+      await stopRunningBrowser();
+      return { moved: false, from: "pool" };
     }
-    if (!profile.cdpIsLoopback) {
+    if (effectiveProfile.driver === "extension") {
+      await stopChromeExtensionRelayServer({ cdpUrl: effectiveProfile.cdpUrl }).catch(() => {});
+      return { moved: false, from: effectiveProfile.cdpUrl };
+    }
+    if (!effectiveProfile.cdpIsLoopback) {
       throw new Error(
         `reset-profile is only supported for local profiles (profile "${profile.name}" is remote).`,
       );
@@ -544,7 +602,7 @@ function createProfileContext(
   };
 
   return {
-    profile,
+    profile: effectiveProfile,
     ensureBrowserAvailable,
     ensureTabAvailable,
     isHttpReachable,

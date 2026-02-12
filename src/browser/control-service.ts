@@ -38,6 +38,7 @@ export async function startBrowserControlServiceFromConfig(): Promise<BrowserSer
 
   // If any profile uses the Chrome extension relay, start the local relay server eagerly
   // so the extension can connect before the first browser action.
+  // Skip pool profiles — they spawn containers on demand.
   for (const name of Object.keys(resolved.profiles)) {
     const profile = resolveProfile(resolved, name);
     if (!profile || profile.driver !== "extension") {
@@ -77,6 +78,14 @@ export async function stopBrowserControlService(): Promise<void> {
   }
 
   state = null;
+
+  // Shut down ephemeral browser pool containers
+  try {
+    const { shutdownBrowserPool } = await import("../infra/browser-pool.js");
+    await shutdownBrowserPool();
+  } catch {
+    // ignore — pool module may not be loaded
+  }
 
   // Optional: Playwright is not always available (e.g. embedded gateway builds).
   try {

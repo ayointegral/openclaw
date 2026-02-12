@@ -31,6 +31,16 @@ export type ResolvedBrowserConfig = {
   attachOnly: boolean;
   defaultProfile: string;
   profiles: Record<string, BrowserProfileConfig>;
+  /** Ephemeral browser pool settings (passed through from BrowserConfig.pool). */
+  pool?: {
+    image?: string;
+    network?: string;
+    maxConcurrent?: number;
+    maxQueued?: number;
+    memoryLimit?: string;
+    shmSize?: string;
+    timeoutMs?: number;
+  };
 };
 
 export type ResolvedBrowserProfile = {
@@ -40,7 +50,7 @@ export type ResolvedBrowserProfile = {
   cdpHost: string;
   cdpIsLoopback: boolean;
   color: string;
-  driver: "openclaw" | "extension";
+  driver: "openclaw" | "extension" | "pool";
 };
 
 function normalizeHexColor(raw: string | undefined) {
@@ -212,6 +222,7 @@ export function resolveBrowserConfig(
     attachOnly,
     defaultProfile,
     profiles,
+    pool: cfg?.pool,
   };
 }
 
@@ -232,9 +243,14 @@ export function resolveProfile(
   let cdpHost = resolved.cdpHost;
   let cdpPort = profile.cdpPort ?? 0;
   let cdpUrl = "";
-  const driver = profile.driver === "extension" ? "extension" : "openclaw";
+  const driver =
+    profile.driver === "extension" ? "extension" : profile.driver === "pool" ? "pool" : "openclaw";
 
-  if (rawProfileUrl) {
+  if (driver === "pool") {
+    // Pool profiles get a placeholder CDP URL — the real URL is assigned at acquire time
+    cdpUrl = "http://pool-pending:3000";
+    cdpHost = "pool-pending";
+  } else if (rawProfileUrl) {
     const parsed = parseHttpUrl(rawProfileUrl, `browser.profiles.${profileName}.cdpUrl`);
     cdpHost = parsed.parsed.hostname;
     cdpPort = parsed.port;
