@@ -5,7 +5,10 @@ export { appendCdpPath, fetchJson, fetchOk, getHeadersWithAuth } from "./cdp.hel
 export function normalizeCdpWsUrl(wsUrl: string, cdpUrl: string): string {
   const ws = new URL(wsUrl);
   const cdp = new URL(cdpUrl);
-  if (isLoopbackHost(ws.hostname) && !isLoopbackHost(cdp.hostname)) {
+  // Treat 0.0.0.0 (wildcard/unspecified) the same as loopback — it means
+  // "this machine" and must be rewritten to the actual remote hostname.
+  const isWsLocal = isLoopbackHost(ws.hostname) || ws.hostname === "0.0.0.0";
+  if (isWsLocal && !isLoopbackHost(cdp.hostname)) {
     ws.hostname = cdp.hostname;
     const cdpPort = cdp.port || (cdp.protocol === "https:" ? "443" : "80");
     if (cdpPort) {
