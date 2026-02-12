@@ -20,6 +20,8 @@ export interface BrowserPoolConfig {
   healthIntervalMs: number;
   browserlessPort: number;
   containerPrefix: string;
+  /** Interval (ms) for periodic garbage collection of orphaned containers. */
+  gcIntervalMs: number;
   extraEnv?: Record<string, string>;
 }
 
@@ -43,6 +45,7 @@ const DEFAULT_CONFIG: BrowserPoolConfig = {
   healthIntervalMs: 500,
   browserlessPort: 3000,
   containerPrefix: "claw-browser-",
+  gcIntervalMs: 60_000,
   extraEnv: undefined,
 };
 
@@ -74,9 +77,13 @@ export class BrowserPoolManager {
   private readonly queue: QueuedWaiter[] = [];
   private totalCreated = 0;
   private shuttingDown = false;
+  private gcTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(config?: Partial<BrowserPoolConfig>) {
     this.cfg = { ...DEFAULT_CONFIG, ...config };
+    // Run startup orphan cleanup and start periodic GC
+    void this.cleanupOrphans();
+    this.startGc();
   }
 
   // -----------------------------------------------------------------------
@@ -126,6 +133,7 @@ export class BrowserPoolManager {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    this.stopGc();
 
     // Reject all queued waiters
     for (const waiter of this.queue.splice(0)) {
@@ -135,6 +143,9 @@ export class BrowserPoolManager {
     // Release all active containers in parallel
     const releases = [...this.active.keys()].map((id) => this.release(id));
     await Promise.allSettled(releases);
+
+    // Final orphan sweep — catch anything the active map missed
+    await this.cleanupOrphans();
 
     log.info("pool shut down");
   }
@@ -149,8 +160,69 @@ export class BrowserPoolManager {
   }
 
   // -----------------------------------------------------------------------
+  // Orphan cleanup & garbage collection
+  // -----------------------------------------------------------------------
+
+  /**
+   * Find and kill any containers whose name starts with our prefix that
+   * are NOT tracked in the active map. Handles gateway crash recovery and
+   * any containers that leaked past the kill timer.
+   */
+  async cleanupOrphans(): Promise<number> {
+    try {
+      const result = await execDocker(
+        ["ps", "-a", "--filter", `name=${this.cfg.containerPrefix}`, "--format", "{{.Names}}"],
+        { allowFailure: true },
+      );
+      if (result.code !== 0 || !result.stdout?.trim()) {
+        return 0;
+      }
+
+      const allNames = result.stdout
+        .trim()
+        .split("\n")
+        .filter((n) => n.startsWith(this.cfg.containerPrefix));
+
+      // Names we're actively tracking
+      const tracked = new Set([...this.active.values()].map((e) => e.browser.containerName));
+
+      const orphans = allNames.filter((name) => !tracked.has(name));
+      if (orphans.length === 0) {
+        return 0;
+      }
+
+      log.info(`cleaning up ${orphans.length} orphaned container(s): ${orphans.join(", ")}`);
+      await execDocker(["rm", "-f", ...orphans], { allowFailure: true });
+      return orphans.length;
+    } catch (err) {
+      log.warn(`orphan cleanup failed: ${String(err)}`);
+      return 0;
+    }
+  }
+
+  // -----------------------------------------------------------------------
   // Internal
   // -----------------------------------------------------------------------
+
+  private startGc(): void {
+    if (this.gcTimer || this.cfg.gcIntervalMs <= 0) {
+      return;
+    }
+    this.gcTimer = setInterval(() => {
+      void this.cleanupOrphans();
+    }, this.cfg.gcIntervalMs);
+    // Don't keep the process alive just for GC
+    if (typeof this.gcTimer === "object" && "unref" in this.gcTimer) {
+      this.gcTimer.unref();
+    }
+  }
+
+  private stopGc(): void {
+    if (this.gcTimer) {
+      clearInterval(this.gcTimer);
+      this.gcTimer = null;
+    }
+  }
 
   private async startContainer(): Promise<PooledBrowser> {
     const id = randomUUID();
@@ -179,7 +251,9 @@ export class BrowserPoolManager {
       });
     }
 
-    const cdpUrl = `http://${containerName}:${this.cfg.browserlessPort}/chromium/playwright`;
+    // Browserless v2 exposes /json/version at the root; Playwright discovers
+    // the WebSocket URL from that endpoint automatically.
+    const cdpUrl = `http://${containerName}:${this.cfg.browserlessPort}`;
 
     const browser: PooledBrowser = {
       id,
