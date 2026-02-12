@@ -2170,9 +2170,14 @@ export class MemoryIndexManager implements MemorySearchManager {
 
   private async embedQueryWithTimeout(text: string): Promise<number[]> {
     const timeoutMs = this.resolveEmbeddingTimeout("query");
+    // Truncate query to stay within embedding model token limits (~6K tokens ≈ 24K chars).
+    // Embedding models (OpenAI text-embedding-3-small, Gemini, Voyage) cap at 8K tokens;
+    // for search we only need the semantic gist, not the full conversation prompt.
+    const MAX_QUERY_CHARS = 24_000;
+    const truncated = text.length > MAX_QUERY_CHARS ? text.slice(0, MAX_QUERY_CHARS) : text;
     log.debug("memory embeddings: query start", { provider: this.provider.id, timeoutMs });
     return await this.withTimeout(
-      this.provider.embedQuery(text),
+      this.provider.embedQuery(truncated),
       timeoutMs,
       `memory embeddings query timed out after ${Math.round(timeoutMs / 1000)}s`,
     );

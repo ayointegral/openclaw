@@ -216,8 +216,14 @@ export class RedisMemoryManager implements MemorySearchManager {
     const { vectorWeight, textWeight, candidateMultiplier } = this.settings.query.hybrid;
     const candidatePool = maxResults * candidateMultiplier;
 
+    // Truncate query to stay within embedding model token limits (~6K tokens ≈ 24K chars).
+    // Embedding models (OpenAI text-embedding-3-small, Gemini, Voyage) cap at 8K tokens;
+    // for search we only need the semantic gist, not the full conversation prompt.
+    const MAX_QUERY_CHARS = 24_000;
+    const truncatedQuery = query.length > MAX_QUERY_CHARS ? query.slice(0, MAX_QUERY_CHARS) : query;
+
     // Embed query
-    const queryVec = await this.provider.embedQuery(query);
+    const queryVec = await this.provider.embedQuery(truncatedQuery);
     if (!this.vectorDims) {
       this.vectorDims = queryVec.length;
       await ensureChunkIndex(this.client, this.vectorDims);

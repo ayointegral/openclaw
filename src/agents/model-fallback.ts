@@ -196,7 +196,9 @@ function resolveFallbackCandidates(params: {
     if (!resolved) {
       continue;
     }
-    addCandidate(resolved.ref, true);
+    // Explicitly configured fallbacks should always be trusted — don't enforce
+    // the allowlist for models the user intentionally listed in the fallback chain.
+    addCandidate(resolved.ref, false);
   }
 
   if (params.fallbacksOverride === undefined && primary?.provider && primary.model) {
